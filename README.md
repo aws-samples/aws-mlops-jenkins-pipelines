@@ -74,7 +74,7 @@ For creating the Jenkins Pipeline:
 
 #### Create Pipeline
 
-![Alt text](docs/create-job.png?raw=true "Create Pipeline")
+![Alt text](docs/create-pipeline.png?raw=true "Create Pipeline")
 
 #### Define Jenkinsfile
 
@@ -89,8 +89,6 @@ Create a Jenkins pipeline for the specific purpose by copying the content from
 #### Define Jenkinsfile from Git repository
 
 Create a Jenkins pipeline by pointing to a Jenkinsfile directly from the Git repository:
-
-training-pipeline-github
 
 ![Alt text](docs/training-pipeline-github.png?raw=true "Create Pipeline Git")
 
