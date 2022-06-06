@@ -1,0 +1,316 @@
+/*
+ * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * SPDX-License-Identifier: MIT-0
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy of this
+ * software and associated documentation files (the "Software"), to deal in the Software
+ * without restriction, including without limitation the rights to use, copy, modify,
+ * merge, publish, distribute, sublicense, and/or sell copies of the Software, and to
+ * permit persons to whom the Software is furnished to do so.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+ * PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+ * HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+ * OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+ * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */
+
+@Library('github.com/releaseworks/jenkinslib') _
+
+pipeline {
+
+    agent any
+
+    parameters {
+        string(name: "ACCOUNT_ID", description: "", defaultValue: "")
+        string(name: "REGION", description: "", defaultValue: "")
+        string(name: "ROLE_NAME", description: "", defaultValue: "")
+        string(name: "S3_BUCKET_NAME", description: "", defaultValue: "")
+        string(name: "JOB_NAME", description: "", defaultValue: "")
+        choice(name: "JOB_TYPE", description: "", choices: "spark\npython",)
+        string(name: "JOB_ARTIFACT", description: "", defaultValue: "artifacts")
+        string(name: "JOB_ARGUMENTS", description: "", defaultValue: "")
+        string(name: "JOB_CONNECTIONS", description: "", defaultValue: "")
+        string(name: "JOB_TIMEOUT", description: "", defaultValue: "10")
+        string(name: "JOB_MAX_RETRIES", description: "", defaultValue: "1")
+        string(name: "JOB_MAX_CAPACITY", description: "", defaultValue: "1")
+        string(name: "JOB_WORKER_TYPE", description: "", defaultValue: "Standard")
+        string(name: "JOB_NUM_WORKERS", description: "", defaultValue: "2")
+        string(name: "ECR_TRAINING_IMAGE", description: "", defaultValue: "")
+        string(name: "SAGEMAKER_MODEL_PACKAGE_GROUP", description: "", defaultValue: "")
+        string(name: "SAGEMAKER_TRAINING_JOB", description: "", defaultValue: "mlops-jenkins-training")
+        string(name: "S3_TRAINING_INPUT", description: "", defaultValue: "output/data")
+        string(name: "S3_TRAINING_OUTPUT", description: "", defaultValue: "output/model")
+        string(name: "SAGEMAKER_TRAINING_INSTANCE_TYPE", description: "", defaultValue: "ml.c4.xlarge")
+        string(name: "SAGEMAKER_TRAINING_INSTANCE_COUNT", description: "", defaultValue: "1")
+        string(name: "SAGEMAKER_TRAINING_INSTANCE_VOLUME", description: "", defaultValue: "50")
+        string(name: "TRAINING_MAX_RUNTIME", description: "", defaultValue: "7200")
+        string(name: "TRAINING_HYPERPARAMETERS", description: "", defaultValue: "time_freq=2H,epochs=5,early_stopping_patience=40,mini_batch_size=64,learning_rate=5E-4,context_length=84,prediction_length=84")
+        string(name: "CONTENT_TYPE", description: "", defaultValue: "application/json")
+    }
+
+    stages {
+        stage("Upload Glue script") {
+            steps {
+                withAWS(credentials: "jenkins-aws-profile") {
+                    script {
+                        if(params.JOB_TYPE == "spark") {
+                            env.folder = "processing-glue-spark"
+
+                            sh """
+                                aws s3 cp ./labs/00-ml-build-train/algorithms/${env.folder}/src/processing.py s3://${params.S3_BUCKET_NAME}/${params.JOB_ARTIFACT}/${env.folder}/processing.py
+
+                                cd ./algorithms/${env.folder}/src
+
+                                zip -r libs.zip libs/
+
+                                aws s3 cp libs.zip s3://${params.S3_BUCKET_NAME}/${params.JOB_ARTIFACT}/${env.folder}/libs.zip
+
+                                rm -rf libs.zip
+
+                                cd -
+                            """
+                        } else {
+                            env.folder = "processing-glue"
+
+                            sh """
+                                aws s3 cp ./algorithms/${env.folder}/src/processing.py s3://${params.S3_BUCKET_NAME}/${params.JOB_ARTIFACT}/${env.folder}/processing.py
+                            """
+                        }
+                    }
+                }
+             }
+        }
+        stage("Create Glue Job") {
+            steps {
+                withAWS(credentials: "jenkins-aws-profile") {
+                    script {
+                        def status = sh returnStatus: true, script: """
+                            aws glue get-job \
+                            --job-name ${params.JOB_NAME} \
+                            --region ${params.REGION}
+                        """
+
+                        def connections = ""
+                        def connections_arg = ""
+
+                        if(params.JOB_CONNECTIONS != "") {
+                            for(connection in params.JOB_CONNECTIONS.split(",")) {
+                                if(connections == "") {
+                                    connections = "\"" + connection + "\""
+                                } else {
+                                    connections = connections + ",\"" + connection + "\""
+                                }
+                            }
+                        }
+
+                        if(status != 0) {
+
+                            if(connections != "") {
+                                connections_arg = """--connections '{"Connections":[${connections}]}'"""
+                            }
+
+                            if(params.JOB_TYPE == "spark") {
+                                sh """
+                                    aws glue create-job \
+                                    --name ${params.JOB_NAME} \
+                                    --role arn:aws:iam::${params.ACCOUNT_ID}:role/${params.ROLE_NAME} \
+                                    --execution-property '{"MaxConcurrentRuns": 1}' \
+                                    --command '{"Name": "glueetl","ScriptLocation":"s3://${params.S3_BUCKET_NAME}/${params.JOB_ARTIFACT}/${env.folder}/processing.py","PythonVersion":"3"}' \
+                                    --default-arguments '{${params.JOB_ARGUMENTS}' \
+                                    ${connections_arg} \
+                                    --max-retries ${params.JOB_MAX_RETRIES} \
+                                    --worker-type ${params.JOB_WORKER_TYPE} \
+                                    --number-of-workers ${params.JOB_NUM_WORKERS} \
+                                    --timeout ${params.JOB_TIMEOUT} \
+                                    --glue-version 2.0 \
+                                    --region ${params.REGION}
+                                """
+                            } else {
+                                sh """
+                                    aws glue create-job \
+                                    --name ${params.JOB_NAME} \
+                                    --role arn:aws:iam::${params.ACCOUNT_ID}:role/${params.ROLE_NAME} \
+                                    --execution-property '{"MaxConcurrentRuns": 1}' \
+                                    --command '{"Name": "pythonshell","ScriptLocation":"s3://${params.S3_BUCKET_NAME}/${params.JOB_ARTIFACT}/${env.folder}/processing.py","PythonVersion":"3"}' \
+                                    --default-arguments '{${params.JOB_ARGUMENTS}}' \
+                                    ${connections_arg} \
+                                    --max-retries ${params.JOB_MAX_RETRIES} \
+                                    --max-capacity ${params.JOB_MAX_CAPACITY} \
+                                    --timeout ${params.JOB_TIMEOUT} \
+                                    --glue-version 1.0 \
+                                    --region ${params.REGION}
+                                """
+                            }
+                        } else {
+
+                            if(connections != "") {
+                                connections_arg = """"Connections":{"Connections":[${connections}]},"""
+                            }
+
+                            if(params.JOB_TYPE == "spark") {
+                                sh """
+                                    aws glue update-job \
+                                    --job-name ${params.JOB_NAME} \
+                                    --job-update '{"Role":"arn:aws:iam::${params.ACCOUNT_ID}:role/${params.ROLE_NAME}", \
+                                    "Command":{"Name":"glueetl","ScriptLocation":"s3://${params.S3_BUCKET_NAME}/${params.JOB_ARTIFACT}/${env.folder}/processing.py","PythonVersion":"3"},\
+                                    "DefaultArguments":{${params.JOB_ARGUMENTS}}, \
+                                    ${connections_arg} \
+                                    "MaxRetries":${params.JOB_MAX_RETRIES}, \
+                                    "WorkerType":"${params.JOB_WORKER_TYPE}", \
+                                    "NumberOfWorkers":${params.JOB_NUM_WORKERS}, \
+                                    "Timeout":${params.JOB_TIMEOUT}, \
+                                    "GlueVersion":"2.0"}' \
+                                    --region ${params.REGION}
+                                """
+                            } else {
+                                sh """
+                                    aws glue update-job \
+                                    --job-name ${params.JOB_NAME} \
+                                    --job-update '{"Role":"arn:aws:iam::${params.ACCOUNT_ID}:role/${params.ROLE_NAME}", \
+                                    "Command":{"Name":"pythonshell","ScriptLocation":"s3://${params.S3_BUCKET_NAME}/${params.JOB_ARTIFACT}/${env.folder}/processing.py","PythonVersion":"3"},\
+                                    "DefaultArguments":{${params.JOB_ARGUMENTS}}, \
+                                    ${connections_arg} \
+                                    "MaxRetries":${params.JOB_MAX_RETRIES}, \
+                                    "MaxCapacity":${params.JOB_MAX_CAPACITY}, \
+                                    "Timeout":${params.JOB_TIMEOUT}, \
+                                    "GlueVersion":"1.0"}' \
+                                    --region ${params.REGION}
+                                """
+                            }
+                        }
+                    }
+                }
+             }
+        }
+        stage("Start Glue Job") {
+            steps {
+                withAWS(credentials: "jenkins-aws-profile") {
+                    script {
+                        def job_id = sh returnStdout: true, script: """
+                            aws glue start-job-run \
+                            --job-name ${params.JOB_NAME} \
+                            --region ${params.REGION} \
+                            | grep -o '"JobRunId": "[^"]*' \
+                            | grep -o '[^"]*\$'
+                        """
+
+                        job_id = job_id.trim()
+                        job_id = job_id.replaceAll("\\s","")
+
+                        if(job_id == "") {
+                            error "Glue Job " + params.JOB_NAME + " Failed"
+                        }else {
+                            env.job_id = job_id
+
+                            echo "Glue Job ID: ${env.job_id}"
+                        }
+                    }
+                }
+             }
+        }
+        stage("Check Glue Job") {
+            steps {
+                withAWS(credentials: "jenkins-aws-profile") {
+                    script {
+                        sleep(30)
+
+                        def status = "STARTING"
+
+                        while(status in ["STARTING", "RUNNING"]) {
+                            status = sh returnStdout: true, script: """
+                                aws glue get-job-run \
+                                --job-name ${params.JOB_NAME} \
+                                --run-id ${env.job_id} \
+                                --region ${params.REGION} \
+                                | grep -o '"JobRunState": "[^"]*' \
+                                | grep -o '[^"]*\$'
+                            """
+                            status = status.trim()
+                            status = status.replaceAll("\\s","")
+
+                            echo "Glue Job Status: ${status}"
+
+                            if(status in ["STARTING", "RUNNING"]) {
+                                sleep(30)
+                            }
+                        }
+
+                        echo "Glue Job finished with status ${status}"
+
+                        if(status in ["STOPPING", "STOPPED", "FAILED", "ERROR", "TIMEOUT"]) {
+                            error "Glue Job " + params.JOB_NAME + " " + status
+                        }
+                    }
+                }
+             }
+        }
+        stage("Start SageMaker Training Job") {
+            steps {
+                withAWS(credentials: "jenkins-aws-profile") {
+                    sh """
+                        aws sagemaker create-training-job \
+                        --training-job-name ${params.SAGEMAKER_TRAINING_JOB}-${currentBuild.startTimeInMillis} \
+                        --algorithm-specification TrainingImage=${params.ECR_TRAINING_IMAGE},TrainingInputMode="File" \
+                        --input-data-config '[{"ChannelName": "train", "DataSource": { "S3DataSource": { "S3DataType": "S3Prefix", "S3Uri": "s3://${params.S3_BUCKET_NAME}/${params.S3_TRAINING_INPUT}/train", "S3DataDistributionType": "FullyReplicated"}}},{"ChannelName": "test", "DataSource": { "S3DataSource": { "S3DataType": "S3Prefix", "S3Uri": "s3://${params.S3_BUCKET_NAME}/${params.S3_TRAINING_INPUT}/test", "S3DataDistributionType": "FullyReplicated"}}}]' \
+                        --output-data-config S3OutputPath='s3://${params.S3_BUCKET_NAME}/${params.S3_TRAINING_OUTPUT}' \
+                        --hyper-parameters ${params.TRAINING_HYPERPARAMETERS} \
+                        --resource-config InstanceType=${params.SAGEMAKER_TRAINING_INSTANCE_TYPE},InstanceCount=${params.SAGEMAKER_TRAINING_INSTANCE_COUNT},VolumeSizeInGB=${params.SAGEMAKER_TRAINING_INSTANCE_VOLUME} \
+                        --stopping-condition MaxRuntimeInSeconds=${params.TRAINING_MAX_RUNTIME} \
+                        --role-arn arn:aws:iam::${params.ACCOUNT_ID}:role/${params.ROLE_NAME} \
+                        --region ${params.REGION}
+                    """
+                }
+            }
+        }
+        stage("Check SageMaker Training Job") {
+            steps {
+                withAWS(credentials: "jenkins-aws-profile") {
+                    script {
+                        sleep(30)
+
+                        def status = "InProgress"
+
+                        while(status == "InProgress") {
+                            status = sh returnStdout: true, script: """
+                                aws sagemaker describe-training-job \
+                                --training-job-name ${params.SAGEMAKER_TRAINING_JOB}-${currentBuild.startTimeInMillis} \
+                                --region ${params.REGION} \
+                                | grep -o '"TrainingJobStatus": "[^"]*' \
+                                | grep -o '[^"]*\$'
+                            """
+                            status = status.trim()
+                            status = status.replaceAll("\\s","")
+
+                            echo "SageMaker Training Status: ${status}"
+
+                            if(status == "InProgress") {
+                                sleep(30)
+                            }
+                        }
+
+                        echo "SageMaker Training finished with status: ${status}"
+
+                        if(status in ["Failed", "Stopping", "Stopped"]) {
+                            error "SageMaker Training Job " + params.SAGEMAKER_TRAINING_JOB "-" + currentBuild.startTimeInMillis + " Failed"
+                        }
+                    }
+                }
+            }
+        }
+        stage("Register SageMaker Model Package") {
+            steps {
+                withAWS(credentials: "jenkins-aws-profile") {
+                    sh """
+                        aws sagemaker create-model-package \
+                        --model-package-group-name ${params.SAGEMAKER_MODEL_PACKAGE_GROUP} \
+                        --inference-specification '{"Containers": [{"Image": "${params.ECR_TRAINING_IMAGE}", "ModelDataUrl": "s3://${params.S3_BUCKET_NAME}/${params.S3_TRAINING_OUTPUT}/${params.SAGEMAKER_TRAINING_JOB}-${currentBuild.startTimeInMillis}/output/model.tar.gz"}], "SupportedTransformInstanceTypes": ["${params.SAGEMAKER_TRAINING_INSTANCE_TYPE}"], "SupportedRealtimeInferenceInstanceTypes": ["${params.SAGEMAKER_TRAINING_INSTANCE_TYPE}"], "SupportedContentTypes": ["${params.CONTENT_TYPE}"], "SupportedResponseMIMETypes": ["${params.CONTENT_TYPE}"]}' \
+                        --model-approval-status PendingManualApproval \
+                        --region ${params.REGION}
+                    """
+                }
+            }
+        }
+    }
+}

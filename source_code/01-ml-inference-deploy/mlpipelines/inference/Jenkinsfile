@@ -1,0 +1,197 @@
+/*
+ * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * SPDX-License-Identifier: MIT-0
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy of this
+ * software and associated documentation files (the "Software"), to deal in the Software
+ * without restriction, including without limitation the rights to use, copy, modify,
+ * merge, publish, distribute, sublicense, and/or sell copies of the Software, and to
+ * permit persons to whom the Software is furnished to do so.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+ * PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+ * HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+ * OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+ * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */
+
+pipeline {
+
+    agent any
+
+    parameters {
+        string(name: "ACCOUNT_ID", description: "", defaultValue: "")
+        string(name: "REGION", description: "", defaultValue: "")
+        string(name: "ROLE_NAME", description: "", defaultValue: "")
+        string(name: "S3_BUCKET", description: "", defaultValue: "")
+        string(name: "SAGEMAKER_MODEL_PACKAGE_GROUP", description: "", defaultValue: "")
+        string(name: "SAGEMAKER_INSTANCE_COUNT", description: "", defaultValue: "1")
+        string(name: "SAGEMAKER_INSTANCE_TYPE", description: "", defaultValue: "ml.m5.xlarge")
+        string(name: "JOB_INPUT", description: "", defaultValue: "output/data/test/test.json")
+        string(name: "JOB_OUTPUT", description: "", defaultValue: "output/data/inference")
+        string(name: "JOB_ENVS", description: "", defaultValue: "")
+        string(name: "JOB_MAX_CONCURRENCY", description: "", defaultValue: "1")
+        string(name: "JOB_STRATEGY", description: "", defaultValue: "MultiRecord")
+        string(name: "JOB_SPLIT_TYPE", description: "", defaultValue: "Line")
+    }
+
+    stages {
+        stage("Get last Approved model") {
+            steps {
+                withAWS(credentials: "jenkins-aws-profile") {
+                    script {
+                        def model_arn = sh returnStdout: true, script: """
+                            aws sagemaker list-model-packages \
+                            --model-package-group-name ${params.SAGEMAKER_MODEL_PACKAGE_GROUP} \
+                            --model-approval-status Approved \
+                            --sort-order Descending \
+                            --sort-by CreationTime \
+                            --max-items 1 \
+                            --region ${params.REGION} \
+                            | grep -o '"ModelPackageArn": "[^"]*' \
+                            | grep -o '[^"]*\$'
+                        """
+
+                        model_arn = model_arn.trim()
+                        model_arn = model_arn.replaceAll("\\s","")
+
+                        if(model_arn != "") {
+                            env.model_package_arn = model_arn
+                        } else {
+                            error "No SageMaker Model trained available in the status Approved"
+                        }
+                    }
+                }
+            }
+        }
+        stage("Deploy SageMaker Model") {
+            steps {
+                withAWS(credentials: "jenkins-aws-profile") {
+                    script {
+                        def image_uri = sh returnStdout: true, script: """
+                            aws sagemaker describe-model-package \
+                            --model-package-name ${env.model_package_arn} \
+                            --region ${params.REGION} \
+                            | grep -o '"Image": "[^"]*' \
+                            | grep -o '[^"]*\$'
+                        """
+
+                        image_uri = image_uri.trim()
+                        image_uri = image_uri.replaceAll("\\s","")
+
+                        echo "Image URI ${image_uri}"
+
+                        def model_url = sh returnStdout: true, script: """
+                            aws sagemaker describe-model-package \
+                            --model-package-name ${env.model_package_arn} \
+                            --region ${params.REGION} \
+                            | grep -o '"ModelDataUrl": "[^"]*' \
+                            | grep -o '[^"]*\$'
+                        """
+
+                        echo "Model URL ${model_url}"
+
+                        model_url = model_url.trim()
+                        model_url = model_url.replaceAll("\\s","")
+
+                        sh """
+                           aws sagemaker create-model \
+                           --model-name ${params.SAGEMAKER_MODEL_PACKAGE_GROUP}-${env.BUILD_ID}-model \
+                           --primary-container ContainerHostname=${env.BUILD_ID},Image=""" + image_uri + """,ModelDataUrl=""" + model_url + """,Mode='SingleModel' \
+                           --execution-role-arn arn:aws:iam::${params.ACCOUNT_ID}:role/${params.ROLE_NAME} \
+                           --region ${params.REGION}
+                        """
+                    }
+                }
+            }
+        }
+        stage("Run SageMaker Batch Transform Job") {
+            steps {
+                script {
+                    withAWS(credentials: "jenkins-aws-profile") {
+                        if(params.JOB_ENVS != "") {
+                            sh """
+                               aws sagemaker create-transform-job \
+                               --transform-job-name ${params.SAGEMAKER_MODEL_PACKAGE_GROUP}-${env.BUILD_ID}-${currentBuild.startTimeInMillis} \
+                               --model-name ${params.SAGEMAKER_MODEL_PACKAGE_GROUP}-${env.BUILD_ID}-model \
+                               --max-concurrent-transforms ${params.JOB_MAX_CONCURRENCY} \
+                               --batch-strategy ${params.JOB_STRATEGY} \
+                               --transform-input '{"DataSource": {"S3DataSource": {"S3DataType": "S3Prefix", "S3Uri": "s3://${params.S3_BUCKET}/${params.JOB_INPUT}"}}, "SplitType": "${params.JOB_SPLIT_TYPE}"}' \
+                               --transform-output '{"S3OutputPath": "s3://${params.S3_BUCKET}/${params.JOB_OUTPUT}/${params.SAGEMAKER_MODEL_PACKAGE_GROUP}-${env.BUILD_ID}-${currentBuild.startTimeInMillis}", "AssembleWith": "${params.JOB_SPLIT_TYPE}"}' \
+                               --transform-resources '{"InstanceType": "${params.SAGEMAKER_INSTANCE_TYPE}", "InstanceCount": ${params.SAGEMAKER_INSTANCE_COUNT}}' \
+                               --environment ${params.JOB_ENVS} \
+                               --region ${params.REGION}
+                            """
+                        } else {
+                            sh """
+                               aws sagemaker create-transform-job \
+                               --transform-job-name ${params.SAGEMAKER_MODEL_PACKAGE_GROUP}-${env.BUILD_ID}-${currentBuild.startTimeInMillis} \
+                               --model-name ${params.SAGEMAKER_MODEL_PACKAGE_GROUP}-${env.BUILD_ID}-model \
+                               --max-concurrent-transforms ${params.JOB_MAX_CONCURRENCY} \
+                               --batch-strategy ${params.JOB_STRATEGY} \
+                               --transform-input '{"DataSource": {"S3DataSource": {"S3DataType": "S3Prefix", "S3Uri": "s3://${params.S3_BUCKET}/${params.JOB_INPUT}"}}, "SplitType": "${params.JOB_SPLIT_TYPE}"}' \
+                               --transform-output '{"S3OutputPath": "s3://${params.S3_BUCKET}/${params.JOB_OUTPUT}/${params.SAGEMAKER_MODEL_PACKAGE_GROUP}-${env.BUILD_ID}-${currentBuild.startTimeInMillis}", "AssembleWith": "${params.JOB_SPLIT_TYPE}"}' \
+                               --transform-resources '{"InstanceType": "${params.SAGEMAKER_INSTANCE_TYPE}", "InstanceCount": ${params.SAGEMAKER_INSTANCE_COUNT}}' \
+                               --region ${params.REGION}
+                            """
+                        }
+                    }
+                }
+             }
+        }
+        stage("Check SageMaker Batch Transform Job") {
+            steps {
+                withAWS(credentials: "jenkins-aws-profile") {
+                    script {
+                        sleep(30)
+
+                        def status = "InProgress"
+
+                        while(status == "InProgress") {
+                            status = sh returnStdout: true, script: """
+                                aws sagemaker describe-transform-job \
+                                --transform-job-name ${params.SAGEMAKER_MODEL_PACKAGE_GROUP}-${env.BUILD_ID}-${currentBuild.startTimeInMillis} \
+                                --region ${params.REGION} \
+                                | grep -o '"TransformJobStatus": "[^"]*' \
+                                | grep -o '[^"]*\$'
+                            """
+                            status = status.trim()
+                            status = status.replaceAll("\\s","")
+
+                            echo "SageMaker Batch Transform Job Status: ${status}"
+
+                            if(status == "InProgress") {
+                                sleep(30)
+                            }
+                        }
+
+                        echo "SageMaker Batch Transform Job finished with status: ${status}"
+
+                        if(status in ["Failed", "Stopping", "Stopped"]) {
+                            echo "SageMaker Batch Transform Job ${params.SAGEMAKER_MODEL_PACKAGE_GROUP}-${env.BUILD_ID}-${currentBuild.startTimeInMillis} ${status}"
+                            env.status = status
+                        }
+                    }
+                }
+            }
+        }
+        stage("Delete SageMaker Model") {
+            steps {
+                withAWS(credentials: "jenkins-aws-profile") {
+                    script {
+                        sh """
+                            aws sagemaker delete-model \
+                            --model-name ${params.SAGEMAKER_MODEL_PACKAGE_GROUP}-${env.BUILD_ID}-model \
+                            --region ${params.REGION}
+                        """
+
+                        if(env.status in ["Failed", "Stopping", "Stopped"]) {
+                            error "SageMaker Batch Transform Job ${params.SAGEMAKER_MODEL_PACKAGE_GROUP}-${env.BUILD_ID}-${currentBuild.startTimeInMillis} ${status}"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

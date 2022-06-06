@@ -1,0 +1,350 @@
+# * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# * SPDX-License-Identifier: MIT-0
+# *
+# * Permission is hereby granted, free of charge, to any person obtaining a copy of this
+# * software and associated documentation files (the "Software"), to deal in the Software
+# * without restriction, including without limitation the rights to use, copy, modify,
+# * merge, publish, distribute, sublicense, and/or sell copies of the Software, and to
+# * permit persons to whom the Software is furnished to do so.
+# *
+# * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+# * INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+# * PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+# * HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+# * OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+# * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+AWSTemplateFormatVersion: 2010-09-09
+Description: MLOps Jenkins Resources
+Parameters:
+  KMSAlias:
+    Type: String
+    Description: Alias to assign to the created KMS Key
+    Default: ml-kms
+
+  ModelPackageGroupDescription:
+    Type: String
+    Description: SageMaker model package group description
+    Default: "Model package group"
+
+  ModelPackageGroupName:
+    Type: String
+    Description: SageMaker model package group name
+
+  S3BucketName:
+    Type: String
+    Description: Bucket name used for SM Studio
+
+Resources:
+  ### KMS Section ###
+
+  KmsS3Key:
+    Type: AWS::KMS::Key
+    Properties:
+      EnableKeyRotation: true
+      Enabled: true
+      KeyPolicy:
+        Id: !Ref AWS::StackName
+        Statement:
+          - Sid: Enable administration of the key
+            Effect: Allow
+            Principal:
+              AWS:
+                - !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action:
+              - "kms:*"
+            Resource: "*"
+
+  KmsS3KeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub alias/${KMSAlias}
+      TargetKeyId: !Ref KmsS3Key
+
+  ### Bucket Section ###
+
+  S3BucketMLLogging:
+    Type: AWS::S3::Bucket
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W35
+            reason: "S3 Logging bucket"
+          - id: W51
+            reason: "No bucket policy required"
+    DeletionPolicy: "Retain"
+    UpdateReplacePolicy: "Retain"
+    Properties:
+      BucketName: !Sub "${S3BucketName}-logs"
+      AccessControl: "LogDeliveryWrite"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - BucketKeyEnabled: false
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+
+  S3BucketML:
+    Type: AWS::S3::Bucket
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W51
+            reason: "S3 bucket policy not needed"
+    DeletionPolicy: "Retain"
+    UpdateReplacePolicy: "Retain"
+    Properties:
+      BucketName: !Sub "${S3BucketName}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - BucketKeyEnabled: false
+            ServerSideEncryptionByDefault:
+              KMSMasterKeyID: !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:${KmsS3KeyAlias}"
+              SSEAlgorithm: "aws:kms"
+      LoggingConfiguration:
+        DestinationBucketName: !Ref S3BucketMLLogging
+        LogFilePrefix: s3/
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+
+  ### IAM Policies Section ###
+  
+  KMSPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W13
+            reason: "Star is for allowing all the encryption rules"
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - "kms:CreateGrant"
+              - "kms:Decrypt"
+              - "kms:DescribeKey"
+              - "kms:Encrypt"
+              - "kms:ReEncrypt*"
+              - "kms:GenerateDataKey"
+            Resource:
+              - !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/${KmsS3Key}"
+              - !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/${KMSAlias}"
+          - Effect: Allow
+            Action:
+              - "kms:ListKeys"
+              - "kms:ListAliases"
+            Resource:
+              - "*"
+
+  LoggingPolicy:
+    Type: "AWS::IAM::ManagedPolicy"
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W13
+            reason: "No naming convention defined for the PoC"
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - "cloudwatch:DeleteAlarms"
+              - "cloudwatch:DescribeAlarms"
+              - "cloudwatch:GetMetricData"
+              - "cloudwatch:GetMetricStatistics"
+              - "cloudwatch:ListMetrics"
+              - "cloudwatch:PutMetricAlarm"
+              - "cloudwatch:PutMetricData"
+              - "logs:CreateLogGroup"
+              - "logs:CreateLogStream"
+              - "logs:DescribeLogStreams"
+              - "logs:GetLogEvents"
+              - "logs:PutLogEvents"
+            Resource: 
+              - "*"
+  
+  S3Policy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:DeleteObject
+              - s3:PutObject
+            Resource:
+              - !Sub "arn:aws:s3:::${S3BucketName}/*"
+          - Effect: Allow
+            Action:
+              - s3:ListBucket
+            Resource:
+              - !Sub "arn:aws:s3:::${S3BucketName}"
+
+  ### IAM Policies Section Jenkins ###
+
+  GluePolicyJenkins:
+    Type: AWS::IAM::ManagedPolicy
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W13
+            reason: "Star is for managing Glue resources without a naming convention"
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - "glue:CreateJob"
+              - "glue:DeleteJob"
+              - "glue:GetJob*"
+              - "glue:ListJob*"
+              - "glue:StartJobRun"
+              - "glue:UpdateJob"
+            Resource:
+              - "*"
+
+  KMSPolicyJenkins:
+    Type: AWS::IAM::ManagedPolicy
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W13
+            reason: "Star is for allowing all the encryption rules"
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - "kms:CreateGrant"
+              - "kms:Decrypt"
+              - "kms:DescribeKey"
+              - "kms:Encrypt"
+              - "kms:ReEncrypt*"
+              - "kms:GenerateDataKey"
+            Resource:
+              - "*"
+          - Effect: Allow
+            Action:
+              - "kms:ListKeys"
+              - "kms:ListAliases"
+            Resource:
+              - "*"
+
+  IAMPolicyJenkins:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - "iam:PassRole"
+            Resource:
+              - !Sub "arn:aws:iam::${AWS::AccountId}:role/ml-sagemaker-execution-role"
+
+  S3PolicyJenkins:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - "s3:GetObject"
+              - "s3:DeleteObject"
+              - "s3:PutObject"
+            Resource:
+              - !Sub "arn:aws:s3:::${S3BucketName}/*"
+          - Effect: Allow
+            Action:
+              - s3:ListBucket
+            Resource:
+              - !Sub "arn:aws:s3:::${S3BucketName}"
+
+  SageMakerPolicyJenkins:
+    Type: AWS::IAM::ManagedPolicy
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W13
+            reason: "Star is for managing SageMaker resources without a naming convention"
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - "sagemaker:CreateEndpoint*"
+              - "sagemaker:CreateModel"
+              - "sagemaker:CreateModelPackage"
+              - "sagemaker:CreateTrainingJob"
+              - "sagemaker:CreateTransformJob"
+              - "sagemaker:DescribeEndpoint*"
+              - "sagemaker:DeleteEndpoint*"
+              - "sagemaker:DeleteModel"
+              - "sagemaker:DescribeModel"
+              - "sagemaker:DescribeModelPackage"
+              - "sagemaker:DescribeModelPackageGroup"
+              - "sagemaker:DescribeTrainingJob"
+              - "sagemaker:DescribeTransformJob"
+              - "sagemaker:ListEndpoint*"
+              - "sagemaker:ListModels"
+              - "sagemaker:ListModelPackages"
+              - "sagemaker:ListModelPackageGroups"
+              - "sagemaker:ListTrainingJobs"
+              - "sagemaker:UpdateEndpoint*"
+              - "sagemaker:UpdateModelPackage"
+              - "sagemaker:UpdateTrainingJob"
+              - "sagemaker:StopTrainingJob"
+            Resource:
+              - "*"
+
+  ### IAM Roles Section ###
+
+  SageMakerExecutionRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: "Fixed name for referencing it in the IAM PassRole action"
+    Properties:
+      RoleName: ml-sagemaker-execution-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service:
+                - glue.amazonaws.com
+                - sagemaker.amazonaws.com
+      Path: /
+      ManagedPolicyArns:
+        - !Ref KMSPolicy
+        - !Ref LoggingPolicy
+        - !Ref S3Policy
+
+  ### SageMaker Model Registry
+
+  SageMakerModelPackageGroup:
+    Type: AWS::SageMaker::ModelPackageGroup
+    Properties:
+      ModelPackageGroupDescription: !Ref ModelPackageGroupDescription
+      ModelPackageGroupName: !Ref ModelPackageGroupName
