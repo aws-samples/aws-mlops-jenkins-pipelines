@@ -59,6 +59,41 @@ Amazon SageMaker Model Registry for versioning ML models, IAM policies and roles
   the Jenkins Pipeline for running a batch inference job by using Amazon SageMaker Batch Transform by using the latest approved model taken from the Amazon SageMaker 
   Model Registry
 
+## Jenkins Environment
+
+In this section, you can setup a local Jenkins environment for testing the ML pipelines. Please follow the [README](./jenkins/README.md) for running Jenkins by using the 
+provided Dockerfile in a container.
+
+### Setup pipeline
+
+For creating the Jenkins Pipeline:
+
+#### Create Job
+
+![Alt text](docs/create-job.png?raw=true "Create Job")
+
+#### Create Pipeline
+
+![Alt text](docs/create-job.png?raw=true "Create Pipeline")
+
+#### Define Jenkinsfile
+
+Create a Jenkins pipeline for the specific purpose by copying the content from 
+
+* [ml-build-train/mlpipelines/training](source_code/00-ml-build-train/mlpipelines/training/Jenkinsfile)
+* [ml-inference-deploy/mlpipelines/deploy](source_code/01-ml-inference-deploy/mlpipelines/deploy/Jenkinsfile)
+* [ml-inference-deploy/mlpipelines/deploy](source_code/01-ml-inference-deploy/mlpipelines/inference/Jenkinsfile)
+
+![Alt text](docs/training-pipeline-jenkins.png?raw=true "Define Jenkinsfile")
+
+#### Define Jenkinsfile from Git repository
+
+Create a Jenkins pipeline by pointing to a Jenkinsfile directly from the Git repository:
+
+training-pipeline-github
+
+![Alt text](docs/training-pipeline-github.png?raw=true "Create Pipeline Git")
+
 ## Conclusion
 
 In this example we shared how to implement end to end pipelines for Machine Learning workloads using Jenkins, by using APIs with 
