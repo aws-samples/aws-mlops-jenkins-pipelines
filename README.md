@@ -61,8 +61,8 @@ Amazon SageMaker Model Registry for versioning ML models, IAM policies and roles
 
 ## Jenkins Environment
 
-In this section, you can setup a local Jenkins environment for testing the ML pipelines. Please follow the [README](./jenkins/README.md) for running Jenkins by using the 
-provided Dockerfile in a container.
+In this section, we are setting up a local Jenkins environment for testing the ML pipelines. Please follow the [README](./jenkins/README.md) 
+for running Jenkins by using the provided Dockerfile in a container.
 
 ### Setup pipeline
 
